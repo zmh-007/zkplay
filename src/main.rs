@@ -12,16 +12,16 @@ fn main() -> Result<()> {
         c.common.degree_bits()
     );
 
-    let middle = recursive_proof(&inner)?;
-    let (_, c) = &middle;
+    let second = recursive_proof(&inner)?;
+    let (_, c) = &second;
     eprintln!(
         "Single recursion degree {} = 2^{}",
         c.common.degree(),
         c.common.degree_bits()
     );
 
-    let outer = recursive_proof(&middle)?;
-    let (proof_with_pis, c) = &outer;
+    let third = recursive_proof(&second)?;
+    let (proof_with_pis, c) = &third;
     eprintln!(
         "Double recursion degree {} = 2^{}",
         c.common.degree(),
