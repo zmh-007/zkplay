@@ -1,41 +1,182 @@
-use anyhow::Result;
-use plonky2::iop::witness::{PartialWitness, WitnessWrite};
-use plonky2::plonk::circuit_builder::CircuitBuilder;
-use plonky2::plonk::circuit_data::{CircuitConfig, CircuitData};
-use plonky2::plonk::config::PoseidonGoldilocksConfig;
-use plonky2::plonk::proof::ProofWithPublicInputs;
-use plonky2::field::goldilocks_field::GoldilocksField;
+use plonky2::{
+    field::goldilocks_field::GoldilocksField,
+    hash::{
+        hash_types::HashOut,
+        poseidon::PoseidonHash,
+    }, plonk::config::Hasher,
+};
+use std::collections::HashMap;
+use plonky2::field::types::Field;
 
-pub type C = PoseidonGoldilocksConfig;
-pub type F = GoldilocksField;
-const D: usize = 2;
+type F = GoldilocksField;
+type Index256 = [u8; 32];
+type Key = [u8; 34];
+const TREE_DEPTH: u16 = 256;
 
-pub type ProofTuple<F, C> = (
-    ProofWithPublicInputs<F, C, D>,
-    CircuitData<F, C, D>,
-);
+#[derive(Copy, Clone)]
+struct PathMask {
+    byte_pos: usize,
+    bit_mask: u8,
+}
 
-pub fn recursive_proof(
-    inner: &ProofTuple<F, C>,
-) -> Result<ProofTuple<F, C>>
-{
-    let (inner_proof, inner_cd) = inner;
-    let mut builder = CircuitBuilder::<F, D>::new(CircuitConfig::standard_recursion_zk_config());
-    let pt = builder.add_virtual_proof_with_pis(&inner_cd.common);
+const PATH_MASKS: [PathMask; TREE_DEPTH as usize] = {
+    let mut masks = [PathMask { byte_pos: 0, bit_mask: 0 }; TREE_DEPTH as usize];
+    let mut depth = 0;
+    while depth < TREE_DEPTH {
+        let bit_pos = 255 - depth;
+        masks[depth as usize] = PathMask {
+            byte_pos: (bit_pos / 8) as usize,
+            bit_mask: 0x80 >> (bit_pos % 8),
+        };
+        depth += 1;
+    }
+    masks
+};
 
-    let inner_data = builder.add_virtual_verifier_data(inner_cd.common.config.fri_config.cap_height);
+#[derive(Debug, Clone)]
+pub struct SparseMerkleTree {
+    default_hashes: [HashOut<F>;TREE_DEPTH as usize + 1],
+    nodes: HashMap<Key, HashOut<F>>,
+}
 
-    builder.verify_proof::<C>(&pt, &inner_data, &inner_cd.common);
+impl SparseMerkleTree {
+    const DEFAULT_VALUE: F = F::ZERO;
 
-    let data = builder.build::<C>();
+    pub fn new() -> Self {
+        let mut default_hashes = [Self::default_leaf_hash(); TREE_DEPTH as usize + 1];
+        for i in (0..= TREE_DEPTH as usize - 1).rev() {
+            default_hashes[i] = Self::combine(&default_hashes[i + 1], &default_hashes[i + 1]);
+        }
 
-    let mut pw = PartialWitness::new();
-    pw.set_proof_with_pis_target(&pt, inner_proof)?;
-    pw.set_verifier_data_target(&inner_data, &inner_cd.verifier_only)?;
+        Self {
+            default_hashes,
+            nodes: HashMap::new(),
+        }
+    }
 
-    let proof = data.prove(pw)?;
+    pub fn insert(&mut self, index: Index256, value: F) {
+        let key = Self::composite_key(TREE_DEPTH, &index);
+        let leaf_hash = PoseidonHash::hash_no_pad(&[value]);
+        self.nodes.insert(key, leaf_hash);
+        self.update_path(TREE_DEPTH, index);
+    }
 
-    data.verify(proof.clone())?;
+    pub fn root(&self) -> HashOut<F> {
+        let root_index = [0u8; 32];
+        self.get_node(0, &root_index)
+            .unwrap_or_else(|| self.default_hashes[0])
+    }
 
-    Ok((proof, data))
+    pub fn prove(&self, index: &Index256) -> Vec<HashOut<F>> {
+        let mut proof = Vec::with_capacity(TREE_DEPTH as usize);
+        let mut current_index = *index;
+        
+        for depth in (1..=TREE_DEPTH).rev() {
+            let sibling_index = Self::get_sibling_index(depth, &current_index);
+            proof.push(self.get_node(depth, &sibling_index).unwrap_or_else(|| 
+                self.default_hashes[depth as usize]
+            ));
+            current_index = Self::parent_index(depth, &current_index);
+        }
+        
+        proof
+    }
+
+    pub fn verify_proof(root_hash: &HashOut<F>, index: &Index256, value: F, proof: &[HashOut<F>]) -> bool {
+        let leaf_hash = PoseidonHash::hash_no_pad(&[value]);
+        let mut current_hash = leaf_hash;
+        let mut current_index = *index;
+    
+        for (depth, sibling_hash) in proof.iter().enumerate() {
+            let depth = TREE_DEPTH - depth as u16 - 1;
+            let is_right = SparseMerkleTree::is_right_child(depth + 1, &current_index);
+    
+            current_hash = if is_right {
+                SparseMerkleTree::combine(sibling_hash, &current_hash)
+            } else {
+                SparseMerkleTree::combine(&current_hash, sibling_hash)
+            };
+    
+            current_index = SparseMerkleTree::parent_index(depth + 1, &current_index);
+        }
+    
+        current_hash == *root_hash
+    }
+
+    fn update_path(&mut self, mut depth: u16, mut index: Index256) {
+        while depth > 0 {
+            let parent_depth = depth - 1;
+            let parent_index = Self::parent_index(depth, &index);
+            let sibling_index = Self::get_sibling_index(depth, &index);
+    
+            // 通过异或直接获取父索引（替代逐层计算）
+            let current_hash = self.get_node(depth, &index)
+                .unwrap_or_else(|| self.default_hashes[depth as usize]);
+            let sibling_hash = self.get_node(depth, &sibling_index)
+                .unwrap_or_else(|| self.default_hashes[depth as usize]);
+    
+            // 直接根据方向组合哈希
+            let parent_hash = if Self::is_right_child(depth, &index) {
+                Self::combine(&sibling_hash, &current_hash)
+            } else {
+                Self::combine(&current_hash, &sibling_hash)
+            };
+    
+            self.nodes.insert(Self::composite_key(parent_depth, &parent_index), parent_hash);
+            depth = parent_depth;
+            index = parent_index;
+        }
+    }
+
+    fn is_right_child(depth: u16, index: &Index256) -> bool {
+        Self::get_bit(index, depth)
+    }
+
+    fn parent_index(depth: u16, index: &Index256) -> Index256 {
+        let mut parent = *index;
+        Self::clear_bit(&mut parent, depth);
+        parent
+    }
+
+    fn get_sibling_index(depth: u16, index: &Index256) -> Index256 {
+        let mut sibling = *index;
+        Self::flip_bit(&mut sibling, depth);
+        sibling
+    }
+
+    fn get_bit(index: &Index256, depth: u16) -> bool {
+        let mask = &PATH_MASKS[depth as usize - 1];
+        (index[mask.byte_pos] & mask.bit_mask) != 0
+    }
+
+    fn clear_bit(index: &mut Index256, depth: u16) {
+        let mask = &PATH_MASKS[depth as usize - 1];
+        index[mask.byte_pos] &= !mask.bit_mask;
+    }
+
+    fn flip_bit(index: &mut Index256, depth: u16) {
+        let mask = &PATH_MASKS[depth as usize - 1];
+        index[mask.byte_pos] ^= mask.bit_mask;
+    }
+
+    fn default_leaf_hash() -> HashOut<F> {
+        PoseidonHash::hash_no_pad(&[Self::DEFAULT_VALUE])
+    }
+
+    fn combine(left: &HashOut<F>, right: &HashOut<F>) -> HashOut<F> {
+        let mut inputs = left.elements.to_vec();
+        inputs.extend_from_slice(&right.elements);
+        PoseidonHash::hash_no_pad(&inputs)
+    }
+
+    fn composite_key(depth: u16, index: &Index256) -> [u8; 34] {
+        let mut key = [0u8; 34];
+        key[0..2].copy_from_slice(&depth.to_be_bytes());
+        key[2..].copy_from_slice(index);
+        key
+    }
+
+    fn get_node(&self, depth: u16, index: &Index256) -> Option<HashOut<F>> {
+        self.nodes.get(&Self::composite_key(depth, index)).copied()
+    }
 }
