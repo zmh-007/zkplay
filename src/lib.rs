@@ -37,6 +37,7 @@ const PATH_MASKS: [PathMask; TREE_DEPTH as usize] = {
 pub struct SparseMerkleTree {
     default_hashes: [HashOut<F>;TREE_DEPTH as usize + 1],
     nodes: HashMap<Key, HashOut<F>>,
+    leaves: HashMap<Index256, F>,
 }
 
 impl SparseMerkleTree {
@@ -51,14 +52,21 @@ impl SparseMerkleTree {
         Self {
             default_hashes,
             nodes: HashMap::new(),
+            leaves: HashMap::new(),
         }
     }
 
     pub fn insert(&mut self, index: Index256, value: F) {
+        self.leaves.insert(index, value);
+
         let key = Self::composite_key(TREE_DEPTH, &index);
         let leaf_hash = PoseidonHash::hash_no_pad(&[value]);
         self.nodes.insert(key, leaf_hash);
         self.update_path(TREE_DEPTH, index);
+    }
+
+    pub fn get(&self, index: &Index256) -> Option<&F> {
+        self.leaves.get(index)
     }
 
     pub fn root(&self) -> HashOut<F> {
@@ -67,22 +75,49 @@ impl SparseMerkleTree {
             .unwrap_or_else(|| self.default_hashes[0])
     }
 
-    pub fn prove(&self, index: &Index256) -> Vec<HashOut<F>> {
-        let mut proof = Vec::with_capacity(TREE_DEPTH as usize);
+    pub fn prove(&self, index: &Index256) -> (F, [HashOut<F>; 256]) {
+        let mut proof = [HashOut::ZERO; TREE_DEPTH as usize];
         let mut current_index = *index;
+        let value = self.leaves.get(index).unwrap_or(&Self::DEFAULT_VALUE);
         
         for depth in (1..=TREE_DEPTH).rev() {
             let sibling_index = Self::get_sibling_index(depth, &current_index);
-            proof.push(self.get_node(depth, &sibling_index).unwrap_or_else(|| 
+            proof[(TREE_DEPTH - depth) as usize] = self.get_node(depth, &sibling_index).unwrap_or_else(|| 
                 self.default_hashes[depth as usize]
-            ));
+            );
             current_index = Self::parent_index(depth, &current_index);
         }
         
-        proof
+        (value.clone(), proof)
     }
 
-    pub fn verify_proof(root_hash: &HashOut<F>, index: &Index256, value: F, proof: &[HashOut<F>]) -> bool {
+    pub fn verify_proof(&self, root_hash: &HashOut<F>, index: &Index256, proof: &[HashOut<F>; 256]) -> bool {
+        let value = match self.get(index) {
+            Some(v) => *v,
+            None => return false,
+        };
+
+        let leaf_hash = PoseidonHash::hash_no_pad(&[value]);
+        let mut current_hash = leaf_hash;
+        let mut current_index = *index;
+    
+        for (depth, sibling_hash) in proof.iter().enumerate() {
+            let depth = TREE_DEPTH - depth as u16 - 1;
+            let is_right = SparseMerkleTree::is_right_child(depth + 1, &current_index);
+    
+            current_hash = if is_right {
+                SparseMerkleTree::combine(sibling_hash, &current_hash)
+            } else {
+                SparseMerkleTree::combine(&current_hash, sibling_hash)
+            };
+    
+            current_index = SparseMerkleTree::parent_index(depth + 1, &current_index);
+        }
+    
+        current_hash == *root_hash
+    }
+
+    pub fn verify_proof_with_data(root_hash: &HashOut<F>, index: &Index256, value: F, proof: &[HashOut<F>; 256]) -> bool {
         let leaf_hash = PoseidonHash::hash_no_pad(&[value]);
         let mut current_hash = leaf_hash;
         let mut current_index = *index;
