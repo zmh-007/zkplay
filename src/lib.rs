@@ -109,13 +109,11 @@ impl SparseMerkleTree {
             let parent_index = Self::parent_index(depth, &index);
             let sibling_index = Self::get_sibling_index(depth, &index);
     
-            // 通过异或直接获取父索引（替代逐层计算）
             let current_hash = self.get_node(depth, &index)
                 .unwrap_or_else(|| self.default_hashes[depth as usize]);
             let sibling_hash = self.get_node(depth, &sibling_index)
                 .unwrap_or_else(|| self.default_hashes[depth as usize]);
     
-            // 直接根据方向组合哈希
             let parent_hash = if Self::is_right_child(depth, &index) {
                 Self::combine(&sibling_hash, &current_hash)
             } else {

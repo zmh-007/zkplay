@@ -5,18 +5,15 @@ use zkplay::SparseMerkleTree;
 type F = GoldilocksField;
 
 fn main() {
-    // 初始化稀疏Merkle树
     let mut tree = SparseMerkleTree::new();
 
-    // 定义测试索引和值
-    let index1 = [0u8; 32]; // 示例索引1（全0）
+    let index1 = [0u8; 32];
     let value1 = F::ONE;
 
     let mut index2 = [0u8; 32];
-    index2[31] = 0x01; // 示例索引2（最后一个字节不同）
+    index2[31] = 0x01;
     let value2 = F::from_canonical_u64(42);
 
-    // 插入值并获取根哈希
     tree.insert(index1, value1);
     tree.insert(index2, value2);
     let root = tree.root();
