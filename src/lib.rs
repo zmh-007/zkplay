@@ -204,7 +204,7 @@ impl SparseMerkleTree {
 
     fn composite_key(depth: u16, index: &Index256) -> [u8; 34] {
         let mut key = [0u8; 34];
-        key[0..2].copy_from_slice(&depth.to_be_bytes());
+        key[0..2].copy_from_slice(&depth.to_le_bytes());
         key[2..].copy_from_slice(index);
         key
     }
