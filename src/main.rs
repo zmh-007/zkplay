@@ -21,22 +21,23 @@ fn main() {
     tree.insert(index2, value2);
     let root = tree.root();
 
-    // 生成证明并验证
     let proof1 = tree.prove(&index1);
     let proof2 = tree.prove(&index2);
 
-    // 验证正确的证明
     assert!(SparseMerkleTree::verify_proof(&root, &index1, value1, &proof1));
     assert!(SparseMerkleTree::verify_proof(&root, &index2, value2, &proof2));
 
-    // 验证错误的证明（错误的值）
     assert!(!SparseMerkleTree::verify_proof(&root, &index1, F::TWO, &proof1));
 
-    // 验证不存在的索引（应失败）
     let mut non_existent_index = [0u8; 32];
     non_existent_index[0] = 0xFF;
     let non_existent_proof = tree.prove(&non_existent_index);
     assert!(!SparseMerkleTree::verify_proof(&root, &non_existent_index, F::ONE, &non_existent_proof));
+
+    let mut non_existent_index = [0u8; 32];
+    non_existent_index[0] = 0x59;
+    let non_existent_proof = tree.prove(&non_existent_index);
+    assert!(SparseMerkleTree::verify_proof(&root, &non_existent_index, F::ZERO, &non_existent_proof));
 
     println!("All tests passed!");
 }
